@@ -1,0 +1,57 @@
+name: Sync AUR Package
+
+on:
+  schedule:
+    - cron: '0 */6 * * *'
+  workflow_dispatch:
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check latest upstream release
+        id: upstream
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          UPSTREAM_REPO="anywhere-labs/dsh-desktop"
+          LATEST_TAG=$(gh release view --repo "$UPSTREAM_REPO" --json tagName -q .tagName)
+          RAW="${LATEST_TAG#v}"
+          NORMALIZED="${RAW//-/_}"
+          CURRENT=$(grep '^pkgver=' PKGBUILD | cut -d= -f2)
+          echo "raw=$RAW" >> "$GITHUB_OUTPUT"
+          echo "normalized=$NORMALIZED" >> "$GITHUB_OUTPUT"
+          echo "current=$CURRENT" >> "$GITHUB_OUTPUT"
+          if [ "$NORMALIZED" = "$CURRENT" ]; then
+            echo "up_to_date=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "up_to_date=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Download .deb and compute SHA256
+        if: steps.upstream.outputs.up_to_date == 'false'
+        run: |
+          RAW="${{ steps.upstream.outputs.raw }}"
+          URL="https://github.com/anywhere-labs/dsh-desktop/releases/download/v${RAW}/DSH-NEXT-${RAW}-amd64.deb"
+          curl -L -o package.deb "$URL"
+          echo "SHA256=$(sha256sum package.deb | awk '{print $1}')" >> "$GITHUB_ENV"
+
+      - name: Update PKGBUILD
+        if: steps.upstream.outputs.up_to_date == 'false'
+        run: |
+          sed -i "s/^pkgver=.*/pkgver=${{ steps.upstream.outputs.normalized }}/" PKGBUILD
+          sed -i "s/^sha256sums_x86_64=.*/sha256sums_x86_64=('${{ env.SHA256 }}')/" PKGBUILD
+
+      - name: Publish to AUR
+        if: steps.upstream.outputs.up_to_date == 'false'
+        uses: KSXGitHub/github-actions-deploy-aur@v4.1.3
+        with:
+          pkgname: dsh-next-bin
+          pkgbuild: ./PKGBUILD
+          commit_username: ${{ secrets.AUR_USERNAME }}
+          commit_email: ${{ secrets.AUR_EMAIL }}
+          ssh_private_key: ${{ secrets.AUR_SSH_PRIVATE_KEY }}
+          commit_message: "Update to ${{ steps.upstream.outputs.normalized }}"
+          ssh_keyscan_types: rsa,ecdsa,ed25519
